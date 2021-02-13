@@ -14,7 +14,7 @@ from collections import Counter, defaultdict, namedtuple, deque
 from pprint import pprint
 
 
-nltk.download('stopwords')
+# nltk.download('stopwords')
 
 logger = logging.getLogger(__name__)
 
@@ -65,37 +65,33 @@ class InvertedIndex(object):
 
 
 
+        # Creating blocks of inverted indexes
 
-
-        # # Creating blocks of inverted indexes
-
-        # # remove all files in temp index and temp merged index
-        # for f in os.listdir(self.temp_index_dir):
-        #     os.remove(os.path.join(self.temp_index_dir, f))
+        # remove all files in temp index and temp merged index
+        if not os.path.exists(self.temp_index_dir):
+            os.mkdir(self.temp_index_dir)
+        for f in os.listdir(self.temp_index_dir):
+            os.remove(os.path.join(self.temp_index_dir, f))
         
-        # if not os.path.exists(self.temp_index_dir):
-        #     os.mkdir(self.temp_index_dir)
-        # token_stream = self.token_generator()
-        # try:
-        #     i = 0
-        #     while True:
-        #         temp_index_fname = os.path.join(self.temp_index_dir, "index_block_"+str(i)+".tsv")
-        #         self.spimi_invert(temp_index_fname, token_stream)
-        #         if self.debug:
-        #             logger.debug(f"successfully written: {temp_index_fname}")
-        #         i += 1
-        # except EmptyIndexError:
-        #     if self.debug:
-        #         logger.debug("Empty index. Inverted index blocks are finished. Starting merge...")
+        token_stream = self.token_generator()
+        try:
+            i = 0
+            while True:
+                temp_index_fname = os.path.join(self.temp_index_dir, "index_block_"+str(i)+".tsv")
+                self.spimi_invert(temp_index_fname, token_stream)
+                if self.debug:
+                    logger.debug(f"successfully written: {temp_index_fname}")
+                i += 1
+        except EmptyIndexError:
+            if self.debug:
+                logger.debug("Empty index. Inverted index blocks are finished. Starting merge...")
 
         # Merging blocks of inverted indexes
-        self.merge_indexes()
-        # if self.debug:
-        #         logger.debug(f"success written: {temp_merged_index_fname}")
+        self.merge_indexes(self.final_index_path)
+        if self.debug:
+                logger.debug(f"Merging of index blocks complete. Created: {self.final_index_path}")
 
             
-
-
 
         end = time.time()
         if self.debug:
@@ -114,7 +110,7 @@ class InvertedIndex(object):
         index_block = defaultdict(deque)
         try:
             for _ in range(10000):  # testing purpose!!!
-            # while (psutil.virtual_memory().percent > 90):
+            # while (psutil.virtual_memory().percent < 90):
                 token, posting = next(token_stream)
                 index_block[token].append(posting)
         except StopIteration:
@@ -122,15 +118,12 @@ class InvertedIndex(object):
             if self.debug:
                 logger.debug(f"No more tokens to generate! memory%: {psutil.virtual_memory().percent}")
             
-
         finally:
             with open(fname, 'w') as output:
                 for token, posting in sorted(index_block.items()):
                     output.write(f"{token}\t{posting}\n")
-
             if empty_index:
                 raise EmptyIndexError
-
 
     def token_generator(self) -> Generator:
 
@@ -154,48 +147,57 @@ class InvertedIndex(object):
                 logger.debug(f"Tokenized file: {file_path:16}")
 
 
-
-    def merge_indexes(self):
+    def merge_indexes(self, final_index_path):
         
-        final_index = open("final_index.tsv", 'w')
+        # opening final index and all of the inverted index blocks
+        final_index = open(final_index_path, 'w')
         file_objects = []
         for index_fname in os.listdir(self.temp_index_dir):
             file_objects.append(open(os.path.join(self.temp_index_dir, index_fname), 'r'))
-        
-        i = 0
+
+        # initalize prioity queue with first entries of each file
         hq = []
         token_position = [] # token given by index
         for index_file in file_objects:
             token, posting_deque = index_file.readline().split("\t")
             hq.append((token, posting_deque))
-            token_position.append(token+posting_deque)
+            token_position.append(token + "\t" + posting_deque)
         
+        # first token posting
         heapq.heapify(hq)
-        min_token = heapq.heappop(hq)
-        i = token_position.index(min_token[0] + min_token[1])
-        current_token = min_token[0]
-        dq = eval(min_token[1])
-        
+        min_token, min_postings = heapq.heappop(hq)
+        curr_token, curr_dq = min_token, eval(min_postings)
+        token_index = token_position.index(min_token + "\t" + min_postings)
 
         while hq:
 
-            entity = file_objects[i].readline()
-            token_position[i] = entity
+            entity = file_objects[token_index].readline()
+            token_position[token_index] = entity
 
+            # if line is not a empty string, add to priority queue
             if entity:
                 token, posting_deque = entity.split("\t")
                 heapq.heappush(hq, (token, posting_deque))
 
-            min_token = heapq.heappop(hq) # checking next token
-            i = token_position.index(min_token[0] + min_token[1])
+            min_token, min_postings = heapq.heappop(hq) # checking next token
+            token_index = token_position.index(min_token + "\t" + min_postings)
 
-            if current_token == min_token[0]: # previous token
-                dq = self.merge_sorted_lists(eval(min_token[1]), dq)
+            # if new min token is same as current min token, 
+            # merge the deques of postings.
+            if curr_token == min_token: # previous token
+                curr_dq = self.merge_sorted_lists(eval(min_postings), curr_dq)
 
-            elif current_token != min_token[0]:
-                final_index.write(f"{current_token}\t{dq}\n")
-                current_token = min_token[0] # next token
-                dq = eval(min_token[1]) # next dq
+            # if tokens are not the same as current min token,
+            # write current(or prev) token to file
+            elif curr_token != min_token:
+                final_index.write(f"{curr_token}\t{curr_dq}\n")
+                curr_token = min_token # next token
+                curr_dq = eval(min_postings) # next curr_dq
+        
+        # last one        
+        final_index.write(f"{curr_token}\t{curr_dq}\n")
+
+    
 
 
     @staticmethod
